@@ -48,6 +48,11 @@ obabel "${DATA_DIR}/receptor_raw.pdb" -O "${DATA_DIR}/receptor.pdbqt" \
 obabel "${DATA_DIR}/ligand_mk1.pdb" -O "${DATA_DIR}/ligand.pdbqt" \
     --gen3d -h 2>/dev/null
 
+echo "==> Generating GPU MD inputs (receptor.pdb, ligand.sdf)"
+cp "${DATA_DIR}/receptor_raw.pdb" "${DATA_DIR}/receptor.pdb"
+obabel "${DATA_DIR}/ligand_mk1.pdb" -O "${DATA_DIR}/ligand.sdf" 2>/dev/null
+echo "    receptor.pdb, ligand.sdf"
+
 echo "==> Writing box.txt (published Vina tutorial box for 1HSG)"
 # Box centred on the 1HSG binding site; from the official AutoDock Vina tutorial.
 cat > "${DATA_DIR}/box.txt" <<'BOX'
@@ -86,6 +91,7 @@ PY
 echo ""
 echo "==> Example data ready in ${DATA_DIR}/"
 echo "    receptor.pdbqt, ligand.pdbqt, box.txt, test_*.pdbqt"
+echo "    receptor.pdb, ligand.sdf  (GPU MD inputs)"
 echo ""
 echo "    Upload inputs to R2 then submit:"
 echo "    python submit.py --mode cpu --manifest examples/docking/jobs.json \\"
