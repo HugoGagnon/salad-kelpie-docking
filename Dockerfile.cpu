@@ -22,8 +22,9 @@ RUN apt-get update \
     && curl --fail --location --retry 3 "$SMINA_URL" -o /usr/local/bin/smina \
     && chmod 0755 /usr/local/bin/smina \
     && /usr/local/bin/smina --version \
-    # Install boto3 for the worker's R2 client (multi-job mode only; Kelpie handles sync in single-job mode).
-    && pip3 install --no-cache-dir boto3
+    # boto3 for multi-job mode R2 access.
+    # --break-system-packages is required on Debian bookworm (PEP 668).
+    && pip3 install --no-cache-dir --break-system-packages boto3
 
 # Download Kelpie.  Pin by SHA-256 when a digest is provided.
 RUN curl --fail --location --retry 3 \
