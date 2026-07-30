@@ -27,11 +27,12 @@ PDB_ID="1hsg"
 DATA_DIR="data/${PDB_ID}__indinavir"
 mkdir -p "$DATA_DIR"
 
-echo "==> Downloading ${PDB_ID^^}.pdb from RCSB"
+PDB_ID_UPPER="$(echo "$PDB_ID" | tr '[:lower:]' '[:upper:]')"
+echo "==> Downloading ${PDB_ID_UPPER}.pdb from RCSB"
 if command -v wget &>/dev/null; then
-    wget -q "https://files.rcsb.org/download/${PDB_ID^^}.pdb" -O "${DATA_DIR}/${PDB_ID}.pdb"
+    wget -q "https://files.rcsb.org/download/${PDB_ID_UPPER}.pdb" -O "${DATA_DIR}/${PDB_ID}.pdb"
 else
-    curl -fsSL "https://files.rcsb.org/download/${PDB_ID^^}.pdb" -o "${DATA_DIR}/${PDB_ID}.pdb"
+    curl -fsSL "https://files.rcsb.org/download/${PDB_ID_UPPER}.pdb" -o "${DATA_DIR}/${PDB_ID}.pdb"
 fi
 
 echo "==> Extracting receptor (protein only, no HETATM, no water)"
