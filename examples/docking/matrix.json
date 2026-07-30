@@ -1,0 +1,15 @@
+{
+  "_comment": "GPU MD job matrix for the 1HSG worked example. Passed to submit.py --mode gpu --manifest.",
+  "complexes": [
+    {
+      "name": "1hsg__indinavir",
+      "target": "1hsg",
+      "ligand": "indinavir"
+    },
+    {
+      "name": "1hsg__ritonavir",
+      "target": "1hsg",
+      "ligand": "ritonavir"
+    }
+  ]
+}

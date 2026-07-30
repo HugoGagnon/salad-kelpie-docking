@@ -1,0 +1,44 @@
+# CPU docking image — smina + Kelpie + worker
+#
+# Lightweight Debian slim base.  No GPU or conda required.
+# Build (x86_64, required by Salad nodes):
+#   docker build --platform linux/amd64 -f Dockerfile.cpu -t <registry>/docking-cpu:001 .
+#
+# Resource sizing note: Salad resource requests filter the pool of eligible
+# nodes.  Requesting more RAM or CPU than a job actually needs reduces the
+# number of machines that match and causes allocation stalls.  Start with the
+# defaults in worker/cpu_worker.py and increase only if jobs fail for that
+# reason.
+FROM debian:bookworm-slim
+
+ARG KELPIE_VERSION=0.6.0
+ARG SMINA_URL=https://sourceforge.net/projects/smina/files/smina.static/download
+ARG SMINA_SHA256=""
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    # Install smina static binary.
+    && curl --fail --location --retry 3 "$SMINA_URL" -o /usr/local/bin/smina \
+    && chmod 0755 /usr/local/bin/smina \
+    && /usr/local/bin/smina --version \
+    # Install boto3 for the worker's R2 client (multi-job mode only; Kelpie handles sync in single-job mode).
+    && pip3 install --no-cache-dir boto3
+
+# Download Kelpie.  Pin by SHA-256 when a digest is provided.
+RUN curl --fail --location --retry 3 \
+        "https://github.com/SaladTechnologies/kelpie/releases/download/${KELPIE_VERSION}/kelpie" \
+        -o /kelpie \
+    && ([ -z "$KELPIE_SHA256" ] || echo "${KELPIE_SHA256}  /kelpie" | sha256sum --check --strict -) \
+    && chmod 0755 /kelpie
+
+WORKDIR /app
+RUN mkdir -p /app/worker /app/input /app/outputs /app/data
+
+COPY worker/cpu_worker.py /app/worker/cpu_worker.py
+# Bake example data into the image so users can test without uploading inputs.
+COPY examples/docking/data/ /app/data/
+
+# Kelpie is the entrypoint.  It reads the job definition, syncs R2 inputs,
+# runs worker/cpu_worker.py, then syncs outputs back to R2.
+CMD ["/kelpie"]

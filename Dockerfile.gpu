@@ -1,0 +1,64 @@
+# GPU MD image — OpenMM + GAFF-2 + MM-GBSA scorer + Kelpie
+#
+# Must be built for x86_64 (Salad nodes are x86_64; CUDA OpenMM has no aarch64 build).
+# On Apple Silicon pass --platform linux/amd64 to force cross-compilation.
+# Build:
+#   docker build --platform linux/amd64 -f Dockerfile.gpu \
+#     --build-arg KELPIE_SHA256=<digest> \
+#     -t <registry>/docking-gpu:001 .
+#
+# Memory note: the conda solve for the full MD stack peaks at ~6-8 GB.
+# In Docker Desktop: Settings → Resources → Memory >= 8 GB.
+# The solve is split into two transactions to keep peak RAM lower.
+#
+# Resource sizing note: GPU nodes are matched by requested GPU count and VRAM.
+# Request only one GPU; do not specify VRAM unless jobs stall on allocation,
+# then broaden hardware classes rather than re-requesting identically.
+FROM continuumio/miniconda3:25.1.1-0
+
+RUN apt-get update && apt-get install -y curl wget && rm -rf /var/lib/apt/lists/*
+
+# Pin channel priority to reduce solver search space and RAM usage.
+RUN conda config --set channel_priority strict
+
+# Solve 1: core MD stack + light chemistry deps.
+# python=3.12 is required by the conda-forge openmm=8.3.0 build.
+# cuda-version=12.6 supplies the CUDA runtime bundled in the openmm package.
+RUN conda install -n base --override-channels -c conda-forge -y \
+        python=3.12 openmm=8.3.0 cuda-version=12.6 rdkit parmed pdbfixer mdtraj \
+    && conda clean -afy
+
+# Solve 2: heavy AmberTools + OpenFF layer (biggest transaction, isolated so it peaks alone).
+# ambertools is required internally by openmmforcefields for AM1-BCC ligand charges.
+RUN conda install -n base --override-channels -c conda-forge -y \
+        ambertools openff-toolkit openmmforcefields \
+    && conda clean -afy
+
+RUN pip install --no-cache-dir boto3 python-dotenv
+
+# Conda's libstdc++ compatibility symlink is absent on this Miniconda base.
+# Without it OpenFF cannot load RDKit.  Keep the symlink dynamic so it tracks
+# the installed version.
+RUN target="$(find /opt/conda/lib -maxdepth 1 -name 'libstdc++.so.6.*' -type f -print -quit)" \
+    && test -n "$target" \
+    && ln -sf "$(basename "$target")" /opt/conda/lib/libstdc++.so.6
+ENV LD_LIBRARY_PATH=/opt/conda/lib
+
+WORKDIR /app
+RUN mkdir -p /app/worker /app/checkpoints /app/outputs /app/data
+
+COPY worker/gpu_worker.py  /app/worker/gpu_worker.py
+COPY worker/md_engine.py   /app/worker/md_engine.py
+COPY worker/mmgbsa.py      /app/worker/mmgbsa.py
+# Bake example receptor/ligand data into the image.
+COPY examples/docking/data/ /app/data/
+
+# Kelpie binary — verify SHA-256 when the build arg is provided.
+ARG KELPIE_VERSION=0.6.0
+ARG KELPIE_SHA256=""
+RUN wget -q "https://github.com/SaladTechnologies/kelpie/releases/download/${KELPIE_VERSION}/kelpie" \
+        -O /kelpie \
+    && ([ -z "$KELPIE_SHA256" ] || echo "${KELPIE_SHA256}  /kelpie" | sha256sum --check --strict -) \
+    && chmod +x /kelpie
+
+CMD ["/kelpie"]

@@ -1,0 +1,33 @@
+{
+  "_comment": "CPU docking job manifest for the 1HSG worked example. Passed to submit.py --manifest.",
+  "jobs": [
+    {
+      "id": "1hsg__indinavir",
+      "cpu_threads": 2,
+      "exhaustiveness": 16,
+      "num_modes": 10,
+      "seed": 42
+    },
+    {
+      "id": "1hsg__ritonavir",
+      "cpu_threads": 2,
+      "exhaustiveness": 16,
+      "num_modes": 10,
+      "seed": 42
+    },
+    {
+      "id": "1hsg__nelfinavir",
+      "cpu_threads": 2,
+      "exhaustiveness": 16,
+      "num_modes": 10,
+      "seed": 42
+    },
+    {
+      "id": "1hsg__lopinavir",
+      "cpu_threads": 2,
+      "exhaustiveness": 16,
+      "num_modes": 10,
+      "seed": 42
+    }
+  ]
+}

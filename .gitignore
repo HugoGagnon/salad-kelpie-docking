@@ -1,0 +1,38 @@
+# Private scrub list — must never be committed
+SCRUB.local.md
+
+# Local credentials
+config/.env
+.env
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Docker build cache artefacts
+.dockerignore-local
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Test output
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Local run artefacts (never commit real outputs)
+submitted_job_ids.txt
+outputs/
+checkpoints/
