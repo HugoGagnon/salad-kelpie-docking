@@ -134,3 +134,38 @@ def test_poll_gpu_ok(tmp_path):
     results = poll.poll_gpu(matrix, "run/v1", "bucket", client, n_reps=1)
     assert results["target__ligand/rep0"]["status"] == "ok"
     assert results["target__ligand/rep0"]["dG_mean_kcal_mol"] == -6.2
+
+
+# ── GPU failure artifacts ─────────────────────────────────────────────────────
+
+def test_poll_gpu_reports_error_artifact_as_failed(tmp_path):
+    """A failure artifact must not be read as a successful score of None.
+
+    gpu_worker.py records deterministic failures (bad SKIP_NS, scorer crash) by
+    writing an "error" key and exiting zero, so that Kelpie uploads it instead
+    of retrying forever.  poll.py has to recognise it.
+    """
+    manifest = tmp_path / "matrix.json"
+    manifest.write_text(json.dumps(
+        {"complexes": [{"name": "r__l", "target": "r", "ligand": "l"}]}))
+    client = MagicMock()
+    payload = {"error": "SKIP_NS (2.0 ns) is >= trajectory length", "stage": "preflight"}
+    client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(payload).encode())}
+    results = poll.poll_gpu(str(manifest), "run/v1", "bucket", client, n_reps=1)
+    entry = results["r__l/rep0"]
+    assert entry["status"] == "failed"
+    assert entry["stage"] == "preflight"
+    # Must be terminal, or --watch never exits.
+    assert entry["status"] in {"ok", "failed"}
+
+
+def test_poll_gpu_still_reports_real_score_as_ok(tmp_path):
+    manifest = tmp_path / "matrix.json"
+    manifest.write_text(json.dumps(
+        {"complexes": [{"name": "r__l", "target": "r", "ligand": "l"}]}))
+    client = MagicMock()
+    payload = {"dG_mean": -42.5, "dG_sem": 1.2}
+    client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(payload).encode())}
+    results = poll.poll_gpu(str(manifest), "run/v1", "bucket", client, n_reps=1)
+    assert results["r__l/rep0"]["status"] == "ok"
+    assert results["r__l/rep0"]["dG_mean_kcal_mol"] == -42.5

@@ -61,6 +61,33 @@ This is automatic.  You do not need to resubmit.
 If a job has been pending for a new allocation for more than 30 minutes, see
 **Stalled allocations** above.
 
+### SKIP_NS must be shorter than the shortest job in the group
+
+`SKIP_NS` (equilibration discarded before scoring) is set on the container
+group and therefore applies to every job in it, but trajectory length is set
+per job with `--prod-ns`.  If `SKIP_NS >= --prod-ns` the scorer would discard
+the entire trajectory and have nothing to average.
+
+The worker checks this before starting MD and records a `preflight` failure in
+R2 rather than running the trajectory first and failing at the scoring step.
+`poll.py` shows it as failed with the reason.
+
+This bites most often on smoke tests: the shipped default `SKIP_NS=2.0` makes
+any `--prod-ns 2` run invalid.  For a short smoke run, lower `SKIP_NS` on the
+group (0.2 is reasonable for 2 ns) or submit a longer trajectory.  Remember the
+value is group-wide — changing it affects every job that group picks up.
+
+### A failed GPU job does not retry forever
+
+Deterministic failures (bad `SKIP_NS`, a scorer crash on a finished
+trajectory) are written to R2 as a result artifact containing an `error` key,
+and the worker exits zero.  This is deliberate: Kelpie runs `sync.after` only
+on a zero exit, so exiting non-zero would strand the explanation on the node
+and Kelpie would re-allocate a GPU to repeat a job whose outcome cannot change.
+
+An *incomplete* trajectory is different and does still exit non-zero — that
+retry resumes from the checkpoint and makes progress, which is what you want.
+
 ---
 
 ## Resuming a campaign with the same run prefix

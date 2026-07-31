@@ -108,6 +108,13 @@ def poll_gpu(manifest_path: str, run_prefix: str, bucket: str, client, n_reps: i
                     results[label] = {"status": "running", "progress_pct": round(pct, 1)}
                 else:
                     results[label] = {"status": "pending"}
+            elif result.get("error"):
+                # gpu_worker.py records deterministic failures as an artifact
+                # rather than a non-zero exit, so they are visible here instead
+                # of looking like a job that never started.
+                results[label] = {"status": "failed",
+                                  "error": result["error"],
+                                  "stage": result.get("stage")}
             else:
                 results[label] = {
                     "status": "ok",
@@ -138,7 +145,11 @@ def report(results: dict) -> None:
         elif status == "running":
             print(f"  … {label}  ({r.get('progress_pct', '?')}%)")
         elif status == "failed":
-            print(f"  ✗ {label}  exit={r.get('exit_code')}")
+            if r.get("error"):
+                stage = f" [{r['stage']}]" if r.get("stage") else ""
+                print(f"  ✗ {label}{stage}  {r['error']}")
+            else:
+                print(f"  ✗ {label}  exit={r.get('exit_code')}")
         else:
             print(f"  ○ {label}  pending")
 

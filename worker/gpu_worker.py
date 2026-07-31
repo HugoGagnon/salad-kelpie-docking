@@ -50,6 +50,20 @@ def main() -> None:
 
     name = f"{target}__{ligand}"
     seed = int(os.getenv("SEED", str(42 + replica)))
+    out_subdir = Path(out_dir) / name
+
+    # SKIP_NS is a container-group-wide constant but prod_ns is per job, so a
+    # short run can ask the scorer to discard its whole trajectory.  Check that
+    # here, in seconds, rather than discovering it after a full MD run.
+    skip_ns = float(os.getenv("SKIP_NS", "2.0"))
+    if skip_ns >= prod_ns:
+        _record_failure(
+            out_subdir, replica, stage="preflight",
+            reason=(f"SKIP_NS ({skip_ns} ns) is >= the requested trajectory "
+                    f"length ({prod_ns} ns); every frame would be discarded as "
+                    f"equilibration and there would be nothing to score. Lower "
+                    f"SKIP_NS on the container group or raise --prod-ns."),
+        )
 
     receptor = _find_input(data_dir, name, "receptor.pdb")
     ligand_file = _find_input(data_dir, name, "ligand.sdf")
@@ -94,9 +108,7 @@ def main() -> None:
     # ── stage 2: MM-GBSA scoring ───────────────────────────────────────────────
     scorer = SCRIPTS_DIR / "mmgbsa.py"
     n_frames = int(os.getenv("N_FRAMES", "50"))
-    skip_ns = float(os.getenv("SKIP_NS", "2.0"))
 
-    out_subdir = Path(out_dir) / name
     out_subdir.mkdir(parents=True, exist_ok=True)
     mmgbsa_json = out_subdir / f"rep{replica}_mmgbsa.json"
 
@@ -109,12 +121,39 @@ def main() -> None:
     ]
     ret = subprocess.run(score_cmd).returncode
     if ret != 0:
-        sys.exit(f"mmgbsa scorer exited {ret}")
+        # The trajectory is finished and checkpointed; only scoring failed, and
+        # it will fail the same way on every retry.  Exiting non-zero here would
+        # skip Kelpie's sync.after so nothing reaches R2, leaving poll.py to
+        # report "pending" while Kelpie re-allocates a GPU to repeat a job that
+        # cannot succeed.  Record the failure instead and exit zero.
+        _record_failure(
+            out_subdir, replica, stage="mmgbsa",
+            reason=f"mmgbsa scorer exited {ret}; the trajectory is complete and "
+                   f"checkpointed, so re-running would fail identically. See the "
+                   f"node log for the scorer's error.",
+        )
 
     # ── copy progress JSON to outputs ─────────────────────────────────────────
     import shutil
     shutil.copy(progress_src, out_subdir / f"rep{replica}_progress.json")
     print(f"[gpu_worker] {name} rep{replica} complete")
+
+
+def _record_failure(out_subdir: Path, replica: int, stage: str, reason: str) -> None:
+    """Write a failure artifact to the output directory and exit zero.
+
+    Deterministic failures must leave evidence in R2.  Kelpie runs sync.after
+    only on a zero exit, so exiting non-zero would strand the explanation on a
+    node that is about to be recycled, and Kelpie would retry a job whose
+    outcome cannot change.  poll.py reads the "error" key and reports the job
+    as failed, which is a terminal state, so --watch can finish.
+    """
+    out_subdir.mkdir(parents=True, exist_ok=True)
+    payload = {"error": reason, "stage": stage, "replica": replica}
+    with open(out_subdir / f"rep{replica}_mmgbsa.json", "w") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"[gpu_worker] FAILED ({stage}): {reason}")
+    sys.exit(0)
 
 
 def _find_input(data_dir: str, name: str, filename: str) -> str:
