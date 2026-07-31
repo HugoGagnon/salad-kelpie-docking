@@ -13,7 +13,8 @@ Inputs baked into the container image at /app/data/<name>/:
   ligand.sdf
 
 Writes to checkpoints/ (continuously uploaded by Kelpie during sync.during):
-  solvated.pdb, system.xml, trajectory.dcd, checkpoint.chk, progress.json
+  solvated.pdb, system.xml, system_metadata.json, trajectory.dcd,
+  checkpoint.chk, progress.json
 
 Writes to outputs/ (uploaded by Kelpie at sync.after):
   <name>/rep<N>_mmgbsa.json
@@ -27,6 +28,7 @@ Usage (invoked by Kelpie via job definition arguments):
   python worker/gpu_worker.py <target> <ligand> <replica> <prod_ns> <ckpt_dir> <out_dir> <data_dir>
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -47,15 +49,32 @@ def main() -> None:
         prod_ns = float(prod_ns_s)
     except ValueError:
         sys.exit(f"replica must be an integer and prod_ns a float: {replica_s!r}, {prod_ns_s!r}")
+    if replica < 0:
+        sys.exit(f"replica must be zero or greater: {replica}")
 
     name = f"{target}__{ligand}"
-    seed = int(os.getenv("SEED", str(42 + replica)))
     out_subdir = Path(out_dir) / name
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        seed = _env_int("SEED", 42 + replica, minimum=0)
+        skip_ns = _env_float("SKIP_NS", 2.0, minimum=0.0)
+        walltime_h = _env_float("WALLTIME_H", 20.0, minimum=0.000001)
+        ckpt_ps = _env_int("CHECKPOINT_PS", 500, minimum=1)
+        n_frames = _env_int("N_FRAMES", 50, minimum=1)
+    except ValueError as exc:
+        _record_failure(out_subdir, replica, stage="preflight", reason=str(exc))
+
+    if not math.isfinite(prod_ns) or prod_ns <= 0:
+        _record_failure(
+            out_subdir, replica, stage="preflight",
+            reason=f"trajectory length must be positive, got {prod_ns} ns",
+        )
 
     # SKIP_NS is a container-group-wide constant but prod_ns is per job, so a
     # short run can ask the scorer to discard its whole trajectory.  Check that
     # here, in seconds, rather than discovering it after a full MD run.
-    skip_ns = float(os.getenv("SKIP_NS", "2.0"))
     if skip_ns >= prod_ns:
         _record_failure(
             out_subdir, replica, stage="preflight",
@@ -65,18 +84,23 @@ def main() -> None:
                     f"SKIP_NS on the container group or raise --prod-ns."),
         )
 
-    receptor = _find_input(data_dir, name, "receptor.pdb")
-    ligand_file = _find_input(data_dir, name, "ligand.sdf")
-    print(f"[gpu_worker] {name} rep{replica} | {prod_ns} ns | seed={seed}")
+    if ckpt_ps > prod_ns * 1000:
+        _record_failure(
+            out_subdir, replica, stage="preflight",
+            reason=(f"CHECKPOINT_PS ({ckpt_ps} ps) exceeds the requested trajectory "
+                    f"length ({prod_ns * 1000:g} ps); lower CHECKPOINT_PS so at "
+                    f"least one trajectory frame is written."),
+        )
 
-    os.makedirs(ckpt_dir, exist_ok=True)
-    os.makedirs(out_dir, exist_ok=True)
+    try:
+        receptor = _find_input(data_dir, name, "receptor.pdb")
+        ligand_file = _find_input(data_dir, name, "ligand.sdf")
+    except FileNotFoundError as exc:
+        _record_failure(out_subdir, replica, stage="preflight", reason=str(exc))
+    print(f"[gpu_worker] {name} rep{replica} | {prod_ns} ns | seed={seed}")
 
     # ── stage 1: MD run ───────────────────────────────────────────────────────
     engine = SCRIPTS_DIR / "md_engine.py"
-    walltime_h = float(os.getenv("WALLTIME_H", "20.0"))
-    ckpt_ps = int(os.getenv("CHECKPOINT_PS", "500"))
-
     md_cmd = [
         sys.executable, str(engine),
         "--receptor", receptor,
@@ -87,16 +111,25 @@ def main() -> None:
         "--walltime-h", str(walltime_h),
         "--seed", str(seed),
     ]
-    ret = subprocess.run(md_cmd).returncode
+    ret = subprocess.run(md_cmd, check=False).returncode
     if ret != 0:
-        sys.exit(f"md_engine exited {ret}")
+        _record_failure(
+            out_subdir, replica, stage="md",
+            reason=f"md_engine exited {ret}; inspect the node log before resubmitting",
+        )
 
     # ── verify trajectory is complete ─────────────────────────────────────────
     progress_src = Path(ckpt_dir) / "progress.json"
     if not progress_src.exists():
         sys.exit("progress.json not found — MD did not write any output")
-    with open(progress_src) as fh:
-        progress = json.load(fh)
+    try:
+        with open(progress_src) as fh:
+            progress = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        _record_failure(
+            out_subdir, replica, stage="md",
+            reason=f"could not read progress.json: {exc}",
+        )
     if not progress.get("complete"):
         # The engine saved a checkpoint but did not reach the target duration.
         # Exit non-zero so Kelpie retries; sync.during has already pushed the
@@ -107,8 +140,6 @@ def main() -> None:
 
     # ── stage 2: MM-GBSA scoring ───────────────────────────────────────────────
     scorer = SCRIPTS_DIR / "mmgbsa.py"
-    n_frames = int(os.getenv("N_FRAMES", "50"))
-
     out_subdir.mkdir(parents=True, exist_ok=True)
     mmgbsa_json = out_subdir / f"rep{replica}_mmgbsa.json"
 
@@ -116,10 +147,11 @@ def main() -> None:
         sys.executable, str(scorer),
         "--work-dir", ckpt_dir,
         "--output", str(mmgbsa_json),
+        "--ligand", ligand_file,
         "--n-frames", str(n_frames),
         "--skip-ns", str(skip_ns),
     ]
-    ret = subprocess.run(score_cmd).returncode
+    ret = subprocess.run(score_cmd, check=False).returncode
     if ret != 0:
         # The trajectory is finished and checkpointed; only scoring failed, and
         # it will fail the same way on every retry.  Exiting non-zero here would
@@ -156,6 +188,30 @@ def _record_failure(out_subdir: Path, replica: int, stage: str, reason: str) -> 
     sys.exit(0)
 
 
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric, got {raw!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {raw!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
 def _find_input(data_dir: str, name: str, filename: str) -> str:
     path = Path(data_dir) / name / filename
     if path.is_file():
@@ -164,7 +220,9 @@ def _find_input(data_dir: str, name: str, filename: str) -> str:
     matches = list(Path(data_dir).glob(f"*{name}*/{filename}"))
     if matches:
         return str(matches[0])
-    sys.exit(f"input not found: {filename} for complex {name} in {data_dir}")
+    raise FileNotFoundError(
+        f"input not found: {filename} for complex {name} in {data_dir}"
+    )
 
 
 if __name__ == "__main__":

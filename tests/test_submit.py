@@ -1,16 +1,12 @@
 """Tests for submit.py — job definition construction.  No network calls."""
-import json
 import sys
-import types
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 # Add repo root to path so we can import submit directly.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import submit
-
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +51,7 @@ def test_cpu_job_def_structure():
     assert job["command"] == "python3"
     assert "/app/worker/cpu_worker.py" in job["arguments"]
     assert job["environment"]["JOB_ID"] == "test-job-001"
+    assert job["environment"]["JOB_KEY"] == "prefix/v1/cpu/test-job-001"
     assert job["environment"]["CPU_THREADS"] == "2"
     assert job["environment"]["EXHAUSTIVENESS"] == "16"
 
@@ -95,6 +92,13 @@ def test_cpu_job_def_defaults():
     assert env["SEED"] == "42"
 
 
+@pytest.mark.parametrize("field,value", [("cpu_threads", 0), ("exhaustiveness", -1),
+                                          ("num_modes", "bad"), ("seed", 0)])
+def test_cpu_job_def_rejects_invalid_numeric_values(field, value):
+    with pytest.raises(ValueError, match="positive integer"):
+        submit.cpu_job_def(_cpu_spec(**{field: value}), "cgid", "bucket", "prefix")
+
+
 # ── gpu_job_def ────────────────────────────────────────────────────────────────
 
 def test_gpu_job_def_structure():
@@ -104,6 +108,7 @@ def test_gpu_job_def_structure():
     assert job["environment"]["LIGAND_NAME"] == "ligand"
     assert job["environment"]["REPLICA"] == "0"
     assert job["environment"]["TARGET_NS"] == "10.0"
+    assert job["environment"]["JOB_KEY"] == "prefix/md/gpu/receptor__ligand/rep0"
 
 
 def test_gpu_job_def_sync_has_during():
@@ -160,6 +165,34 @@ def test_gpu_job_def_accepts_consistent_name():
     ok = {"name": "receptor__ligand", "target": "receptor", "ligand": "ligand"}
     job = submit.gpu_job_def(ok, 0, 10.0, "cgid", "bucket", "campaign/v1")
     assert job["sync"]["after"][0]["prefix"] == "campaign/v1/receptor__ligand/rep0/outputs/"
+
+
+def test_gpu_job_def_rejects_path_characters():
+    bad = {"name": "target__bad/ligand", "target": "target", "ligand": "bad/ligand"}
+    with pytest.raises(ValueError, match="invalid GPU complex"):
+        submit.gpu_job_def(bad, 0, 10.0, "cgid", "bucket", "campaign/v1")
+
+
+@pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf")])
+def test_gpu_job_def_rejects_invalid_duration(duration):
+    with pytest.raises(ValueError, match="positive"):
+        submit.gpu_job_def(
+            _gpu_complex(), 0, duration, "cgid", "bucket", "campaign/v1"
+        )
+
+
+# ── local duplicate-submission guard ─────────────────────────────────────────
+
+def test_duplicate_job_keys_detects_prior_submission():
+    job = submit.gpu_job_def(_gpu_complex(), 0, 10.0, "cgid", "bucket", "run")
+    key = job["environment"]["JOB_KEY"]
+    assert submit._duplicate_job_keys([job], {key}) == {key}
+
+
+def test_duplicate_job_keys_detects_duplicate_in_same_batch():
+    job = submit.gpu_job_def(_gpu_complex(), 0, 10.0, "cgid", "bucket", "run")
+    key = job["environment"]["JOB_KEY"]
+    assert submit._duplicate_job_keys([job, job], set()) == {key}
 
 
 # ── preview / empty job list ──────────────────────────────────────────────────

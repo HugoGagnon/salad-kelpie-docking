@@ -1,9 +1,6 @@
 """Tests for the CPU worker — argument validation and result structure.  No network calls."""
-import importlib
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -93,6 +90,8 @@ def test_result_json_contains_required_fields(tmp_path, monkeypatch):
     monkeypatch.setenv("SEED", "42")
 
     def fake_popen(cmd, **kwargs):
+        poses_path = Path(cmd[cmd.index("--out") + 1])
+        poses_path.write_text("REMARK minimizedAffinity   -8.5\n")
         mock = MagicMock()
         mock.__enter__ = lambda s: s
         mock.__exit__ = MagicMock(return_value=False)
@@ -113,3 +112,35 @@ def test_result_json_contains_required_fields(tmp_path, monkeypatch):
         assert field in result, f"result.json missing field: {field}"
     assert result["job_id"] == "test-job"
     assert result["exit_code"] == 0
+    assert result["best_affinity_kcal_mol"] == pytest.approx(-8.5)
+
+
+def test_missing_input_writes_terminal_failure_artifact(tmp_path, monkeypatch):
+    import cpu_worker
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "outputs"
+    input_dir.mkdir()
+    monkeypatch.setenv("JOB_ID", "missing-input-job")
+
+    with patch.object(cpu_worker, "INPUT_DIR", str(input_dir)), \
+         patch.object(cpu_worker, "OUTPUT_DIR", str(output_dir)):
+        cpu_worker.main()
+
+    result = json.loads((output_dir / "result.json").read_text())
+    assert result["exit_code"] != 0
+    assert "required input not found" in result["error"]
+
+
+def test_clear_directory_contents_preserves_root(tmp_path):
+    import cpu_worker
+
+    (tmp_path / "old.txt").write_text("stale")
+    nested = tmp_path / "old-dir"
+    nested.mkdir()
+    (nested / "old.txt").write_text("stale")
+
+    cpu_worker._clear_directory_contents(str(tmp_path))
+
+    assert tmp_path.is_dir()
+    assert list(tmp_path.iterdir()) == []

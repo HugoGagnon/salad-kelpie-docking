@@ -34,5 +34,6 @@ htmlcov/
 
 # Local run artefacts (never commit real outputs)
 submitted_job_ids.txt
+submitted_jobs.jsonl
 outputs/
 checkpoints/
