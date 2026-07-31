@@ -16,16 +16,15 @@ ARG KELPIE_SHA256=c706b8728d6f3a4f71f34a7be531a7d5944894bb6547edb1b661b2b8fd1f47
 ARG SMINA_URL=https://sourceforge.net/projects/smina/files/smina.static/download
 ARG SMINA_SHA256=ffe5e1e78c947f76b0df8805e2c54383d0bbaf2e827a633b643a708cf682a958
 
+# Install smina and boto3.  --break-system-packages is required on Debian
+# bookworm because the distribution Python follows PEP 668.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    # Install smina static binary.
     && curl --fail --location --retry 3 "$SMINA_URL" -o /usr/local/bin/smina \
     && echo "${SMINA_SHA256}  /usr/local/bin/smina" | sha256sum --check --strict - \
     && chmod 0755 /usr/local/bin/smina \
     && /usr/local/bin/smina --version \
-    # boto3 for multi-job mode R2 access.
-    # --break-system-packages is required on Debian bookworm (PEP 668).
     && pip3 install --no-cache-dir --break-system-packages boto3
 
 # Download the pinned Kelpie release and always verify it.

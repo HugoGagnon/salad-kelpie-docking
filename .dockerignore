@@ -1,0 +1,21 @@
+# Local-only configuration and repository metadata
+.git
+SCRUB.local.md
+config/.env
+config/.env.*
+!config/.env.example
+
+# Local run and test artifacts
+submitted_job_ids.txt
+submitted_jobs.jsonl
+outputs/
+checkpoints/
+.pytest_cache/
+.ruff_cache/
+**/__pycache__/
+**/*.pyc
+
+# Editor and operating-system metadata
+.DS_Store
+.idea/
+.vscode/
