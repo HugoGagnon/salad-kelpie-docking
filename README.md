@@ -198,6 +198,9 @@ See `config/.env.example` for the full list with descriptions.
 
 Variables set in the Salad Portal (worker side) are documented in
 `config/portal.cpu.env.example` and `config/portal.gpu.env.example`.
+Treat those tracked files as references only: never put real credentials in
+them, and enter credential-bearing values as Salad Portal secrets rather than
+ordinary environment variables.
 
 ---
 
