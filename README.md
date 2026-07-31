@@ -185,12 +185,17 @@ replicas and increase only after clean smoke runs:
 
 ```bash
 curl --fail-with-body -X POST "${KELPIE_API_URL}/scaling-rules" \
-  -H "Salad-Api-Key: ${SALAD_API_KEY}" \
-  -H "Salad-Organization: ${SALAD_ORGANIZATION}" \
-  -H "Salad-Project: ${SALAD_PROJECT}" \
-  -H "Content-Type: application/json" \
-  -d "{\"container_group_id\":\"${GPU_CONTAINER_GROUP_ID}\",\"min_replicas\":0,\"max_replicas\":2,\"idle_threshold_seconds\":0}"
+  --header @- \
+  -d "{\"container_group_id\":\"${GPU_CONTAINER_GROUP_ID}\",\"min_replicas\":0,\"max_replicas\":2,\"idle_threshold_seconds\":0}" <<EOF
+Salad-Api-Key: ${SALAD_API_KEY}
+Salad-Organization: ${SALAD_ORGANIZATION}
+Salad-Project: ${SALAD_PROJECT}
+Content-Type: application/json
+EOF
 ```
+
+The here-document sends the headers over standard input so the API key is not
+included in `curl`'s process arguments.
 
 Until this rule is verified, stop the container group manually whenever the
 queue is empty; an idle running GPU worker is still billable.
