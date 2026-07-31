@@ -30,20 +30,22 @@ If jobs sit in `pending` for more than 10 minutes, the fix is to broaden
 hardware classes in the Salad Portal or lower the resource request — never to
 retry identically.  See `docs/RUNBOOK.md`.
 
-**4. CPU prep, GPU run, CPU scoring.**
-Parametrisation, solvation, and MM-GBSA scoring are CPU-bound.  Running them on
-a GPU node wastes accelerator time and increases cost.  This repo encodes that
-split: `Dockerfile.cpu` for docking prep, `Dockerfile.gpu` for MD trajectories,
-and `mmgbsa.py` can run on any CPU.
+**4. CPU docking, GPU MD, in-container CPU scoring.**
+`Dockerfile.cpu` runs smina docking.  `Dockerfile.gpu` runs OpenMM MD and then
+uses the node's CPU for the GBn2/GAFF endpoint estimate.  The GPU remains
+allocated during scoring, so keep `N_FRAMES` modest and verify the cost on a
+one-job smoke test before scaling a campaign.
 
 **5. Cache expensive per-item work.**
-The MD engine caches `system.xml` and `solvated.pdb` in the checkpoint directory
-after the first build.  Resumed jobs skip solvation and AM1-BCC charge
-calculation entirely.
+The MD engine caches `system.xml`, `solvated.pdb`, and
+`system_metadata.json` in the checkpoint directory after the first build.
+Resumed jobs skip solvation and AM1-BCC charge calculation entirely.
 
 **6. The run prefix is provenance.**
 `--run-prefix` is required and has no default.  Reusing a prefix deliberately
-extends a run.  Change it whenever the image, inputs, or protocol change.
+extends a compatible GPU run.  Change it whenever the image, inputs, or
+protocol change.  The submitter also keeps a local `submitted_jobs.jsonl`
+ledger and refuses duplicate job keys unless `--allow-duplicate` is explicit.
 
 ---
 
@@ -111,6 +113,7 @@ the GPU image instead.
 
 ```bash
 source config/.env   # fill in config/.env from config/.env.example first
+export RUN_PREFIX=2026-07-example-v1
 
 for d in examples/docking/data/*/; do
   job_id="$(basename "$d")"
@@ -125,7 +128,7 @@ done
 ```bash
 python submit.py --mode cpu \
                  --manifest examples/docking/jobs.json \
-                 --run-prefix 2024-01-example-v1
+                 --run-prefix 2026-07-example-v1
 ```
 
 ### 5. Poll for results
@@ -133,7 +136,7 @@ python submit.py --mode cpu \
 ```bash
 python poll.py --mode cpu \
                --manifest examples/docking/jobs.json \
-               --run-prefix 2024-01-example-v1 \
+               --run-prefix 2026-07-example-v1 \
                --watch
 ```
 
@@ -149,23 +152,48 @@ python poll.py --mode cpu \
 
 ### Submit
 
+Start with one 3 ns job.  The default `SKIP_NS=2` and `CHECKPOINT_PS=500`
+remain valid for this smoke test.
+
 ```bash
 python submit.py --mode gpu \
                  --manifest examples/docking/matrix.json \
-                 --run-prefix 2024-01-md-v1 \
-                 --prod-ns 10 \
-                 --n-reps 3
+                 --run-prefix 2026-07-md-smoke-v1 \
+                 --prod-ns 3 \
+                 --n-reps 1 \
+                 --max 1
 ```
+
+Confirm the trajectory, checkpoint, and MM-GBSA result in R2 before submitting
+the larger matrix.  Use a new prefix for the corrected engine; checkpoints
+created by versions without `system_metadata.json` are intentionally rejected.
 
 ### Poll
 
 ```bash
 python poll.py --mode gpu \
                --manifest examples/docking/matrix.json \
-               --run-prefix 2024-01-md-v1 \
-               --n-reps 3 \
+               --run-prefix 2026-07-md-smoke-v1 \
+               --n-reps 1 \
                --watch
 ```
+
+### Configure scale-to-zero
+
+Create one Kelpie scaling rule per container group.  Start with a maximum of 2
+replicas and increase only after clean smoke runs:
+
+```bash
+curl --fail-with-body -X POST "${KELPIE_API_URL}/scaling-rules" \
+  -H "Salad-Api-Key: ${SALAD_API_KEY}" \
+  -H "Salad-Organization: ${SALAD_ORGANIZATION}" \
+  -H "Salad-Project: ${SALAD_PROJECT}" \
+  -H "Content-Type: application/json" \
+  -d "{\"container_group_id\":\"${GPU_CONTAINER_GROUP_ID}\",\"min_replicas\":0,\"max_replicas\":2,\"idle_threshold_seconds\":0}"
+```
+
+Until this rule is verified, stop the container group manually whenever the
+queue is empty; an idle running GPU worker is still billable.
 
 ---
 
@@ -180,7 +208,7 @@ python poll.py --mode gpu \
    Kelpie                           Kelpie
      sync.before: R2 → /app/input/    sync.before: R2 → checkpoints/
      run: cpu_worker.py               sync.during: checkpoints/ → R2
-     sync.after: /app/outputs/ → R2   run: gpu_worker.py
+     sync.after: /app/outputs/ → R2   run: gpu_worker.py (GPU MD, CPU scoring)
                                       sync.after: outputs/ → R2
 
  R2 bucket
@@ -208,8 +236,9 @@ pip install pytest boto3
 python -m pytest tests/ -v
 ```
 
-Tests cover job definition construction, polling logic, and worker argument
-validation.  No network access is required.
+Tests cover job definition construction, duplicate protection, polling,
+worker failures, MD unit conversion, progress metadata, and scorer atom
+partitioning.  No network access is required.
 
 ---
 
@@ -218,8 +247,11 @@ validation.  No network access is required.
 Costs scale with trajectory length (ns), system size (number of atoms), and
 Salad node pricing, which varies by GPU model.  No specific figures are given
 here because they must be re-derived for your system size and hardware class.
-Order of magnitude: consumer GPU nodes on Salad are typically 1–2 orders of
-magnitude cheaper than on-demand cloud GPU instances.
+Running replicas are billable while idle; configure and verify Kelpie
+scale-to-zero with `min_replicas=0`.
+Benchmark the current Salad price and measured ns/day for the selected hardware
+against alternatives before scaling; neither pricing nor achieved throughput is
+stable enough for a generic savings multiplier.
 
 ---
 

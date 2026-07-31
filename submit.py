@@ -21,7 +21,9 @@ Usage:
   python submit.py --mode cpu --manifest config/jobs.json --run-prefix test-v1 --dry-run
 """
 import argparse
+import datetime
 import json
+import math
 import os
 import re
 import subprocess
@@ -61,12 +63,15 @@ def post_job(payload: dict, api_key: str, organization: str, project: str) -> tu
             "--data-binary", json.dumps(payload),
             "--write-out", "\n%{http_code}",
         ],
-        input=headers, text=True, capture_output=True,
+        input=headers, text=True, capture_output=True, check=False,
     )
     if result.returncode:
         raise RuntimeError((result.stderr + "\n" + result.stdout).strip())
     body, status_str = result.stdout.rsplit("\n", 1)
-    return int(status_str), json.loads(body).get("id", "")
+    kelpie_id = json.loads(body).get("id", "")
+    if not kelpie_id:
+        raise RuntimeError("Kelpie accepted the request but returned no job id")
+    return int(status_str), kelpie_id
 
 
 # ── CPU docking mode ───────────────────────────────────────────────────────────
@@ -83,6 +88,10 @@ def cpu_job_def(spec: dict, container_group_id: str, bucket: str, run_prefix: st
     job_id = str(spec["id"])
     if not SAFE_ID.fullmatch(job_id):
         raise ValueError(f"invalid job id {job_id!r}")
+    cpu_threads = _positive_int(spec.get("cpu_threads", 2), "cpu_threads")
+    exhaustiveness = _positive_int(spec.get("exhaustiveness", 16), "exhaustiveness")
+    num_modes = _positive_int(spec.get("num_modes", 10), "num_modes")
+    seed = _positive_int(spec.get("seed", 42), "seed")
     input_prefix = clean_prefix(spec.get("input_prefix", f"{run_prefix}/inputs/{job_id}"))
     output_prefix = f"{run_prefix}/outputs/{job_id}"
     return {
@@ -91,13 +100,14 @@ def cpu_job_def(spec: dict, container_group_id: str, bucket: str, run_prefix: st
         "arguments": ["/app/worker/cpu_worker.py"],
         "environment": {
             "JOB_ID": job_id,
+            "JOB_KEY": f"{run_prefix}/cpu/{job_id}",
             # Right-size these down from the maximum available on a node.
             # Resource requests filter the pool of eligible nodes — asking for
             # more CPU threads means fewer machines match and allocation stalls.
-            "CPU_THREADS": str(spec.get("cpu_threads", 2)),
-            "EXHAUSTIVENESS": str(spec.get("exhaustiveness", 16)),
-            "NUM_MODES": str(spec.get("num_modes", 10)),
-            "SEED": str(spec.get("seed", 42)),
+            "CPU_THREADS": str(cpu_threads),
+            "EXHAUSTIVENESS": str(exhaustiveness),
+            "NUM_MODES": str(num_modes),
+            "SEED": str(seed),
         },
         "sync": {
             "before": [{"bucket": bucket, "prefix": input_prefix + "/",
@@ -143,6 +153,13 @@ def gpu_job_def(
     name = cx["name"]
     target = cx["target"]
     ligand = cx["ligand"]
+    for label, value in (("name", name), ("target", target), ("ligand", ligand)):
+        if not SAFE_ID.fullmatch(str(value)):
+            raise ValueError(f"invalid GPU complex {label} {value!r}")
+    if replica < 0:
+        raise ValueError("replica must be zero or greater")
+    if not math.isfinite(prod_ns) or prod_ns <= 0:
+        raise ValueError("production length must be positive")
     # gpu_worker.py recomputes the complex name as f"{target}__{ligand}" and
     # writes its results to outputs/<that name>/, while the R2 root below is
     # keyed on cx["name"].  If the two disagree, results upload to a path
@@ -169,6 +186,7 @@ def gpu_job_def(
         ],
         "environment": {
             "SYSTEM": target,
+            "JOB_KEY": f"{run_prefix}/gpu/{name}/rep{replica}",
             "LIGAND_NAME": ligand,
             "REPLICA": str(replica),
             "TARGET_NS": str(prod_ns),
@@ -236,12 +254,73 @@ def _preview(jobs: list[dict]) -> None:
 
 
 IDS_PATH = "submitted_job_ids.txt"
+LEDGER_PATH = "submitted_jobs.jsonl"
+
+
+def _positive_int(value, label: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+    return parsed
+
+
+def _load_submitted_keys(path: str = LEDGER_PATH) -> set[str]:
+    keys = set()
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("job_key"):
+                    keys.add(record["job_key"])
+    except FileNotFoundError:
+        pass
+    return keys
+
+
+def _duplicate_job_keys(jobs: list[dict], existing: set[str]) -> set[str]:
+    seen = set(existing)
+    duplicates = set()
+    for job in jobs:
+        key = job.get("environment", {}).get("JOB_KEY")
+        if not key:
+            raise ValueError("job definition is missing JOB_KEY")
+        if key in seen:
+            duplicates.add(key)
+        seen.add(key)
+    return duplicates
+
+
+def _append_submission(job_key: str, kelpie_id: str) -> None:
+    record = {
+        "submitted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "job_key": job_key,
+        "kelpie_id": kelpie_id,
+    }
+    with open(LEDGER_PATH, "a") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with open(IDS_PATH, "a") as fh:
+        fh.write(kelpie_id + "\n")
 
 
 def _post_all(jobs: list[dict], args) -> None:
     api_key = os.environ["SALAD_API_KEY"]
     org = os.environ["SALAD_ORGANIZATION"]
     project = os.environ["SALAD_PROJECT"]
+    duplicates = _duplicate_job_keys(jobs, _load_submitted_keys())
+    if duplicates and not args.allow_duplicate:
+        sample = ", ".join(sorted(duplicates)[:3])
+        sys.exit(
+            f"refusing to resubmit {len(duplicates)} existing job key(s): {sample}. "
+            "Use --allow-duplicate only to deliberately resume/extend compatible GPU jobs."
+        )
     submitted = []
     failure = None
     for job in jobs:
@@ -256,12 +335,11 @@ def _post_all(jobs: list[dict], args) -> None:
             failure = f"FAILED to submit {label}: {exc}"
             break
         submitted.append(kelpie_id)
+        _append_submission(job["environment"]["JOB_KEY"], kelpie_id)
         print(f"  {label}: HTTP {status} | id={kelpie_id}")
 
     if submitted:
-        with open(IDS_PATH, "w") as fh:
-            fh.write("\n".join(x for x in submitted if x) + "\n")
-        print(f"\n{len(submitted)} job(s) submitted — IDs saved to {IDS_PATH}")
+        print(f"\n{len(submitted)} job(s) submitted — IDs appended to {IDS_PATH}")
 
     if failure:
         remaining = len(jobs) - len(submitted)
@@ -294,6 +372,9 @@ def main() -> None:
                         help="submit only the first N jobs (smoke test)")
     parser.add_argument("--dry-run", action="store_true",
                         help="build job definitions but do not POST")
+    parser.add_argument("--allow-duplicate", action="store_true",
+                        help="allow a job key already recorded locally; use only "
+                             "for deliberate compatible GPU resume/extension")
     # GPU-only
     parser.add_argument("--prod-ns", type=float, default=10.0,
                         help="[gpu] MD production length in nanoseconds (default: 10)")
@@ -305,6 +386,10 @@ def main() -> None:
 
     if args.max is not None and args.max < 0:
         parser.error("--max must be zero or greater")
+    if not math.isfinite(args.prod_ns) or args.prod_ns <= 0:
+        parser.error("--prod-ns must be positive")
+    if args.n_reps <= 0:
+        parser.error("--n-reps must be positive")
 
     # Deliberately not defaulted to a placeholder: a bogus bucket name would
     # otherwise reach --dry-run output and be reviewed as if it were real.

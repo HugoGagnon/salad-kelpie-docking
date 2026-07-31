@@ -58,6 +58,12 @@ GPU MD jobs are interruptible by design.  If a Salad node is preempted
 
 This is automatic.  You do not need to resubmit.
 
+The current cache includes `system.xml`, `solvated.pdb`, and
+`system_metadata.json` alongside the checkpoint/progress/trajectory files.  A
+legacy checkpoint without `system_metadata.json` is rejected because its
+receptor/ligand partition and protocol cannot be verified.  Start corrected
+runs under a new prefix.
+
 If a job has been pending for a new allocation for more than 30 minutes, see
 **Stalled allocations** above.
 
@@ -79,8 +85,9 @@ value is group-wide — changing it affects every job that group picks up.
 
 ### A failed GPU job does not retry forever
 
-Deterministic failures (bad `SKIP_NS`, a scorer crash on a finished
-trajectory) are written to R2 as a result artifact containing an `error` key,
+Deterministic failures (bad environment values, missing baked inputs, an MD
+child failure, or a scorer crash) are written to R2 as a result artifact
+containing an `error` key,
 and the worker exits zero.  This is deliberate: Kelpie runs `sync.after` only
 on a zero exit, so exiting non-zero would strand the explanation on the node
 and Kelpie would re-allocate a GPU to repeat a job whose outcome cannot change.
@@ -95,7 +102,8 @@ retry resumes from the checkpoint and makes progress, which is what you want.
 Using the same `--run-prefix` deliberately extends an existing campaign:
 - **GPU jobs resume. CPU jobs do not.**
 - GPU jobs: `sync.before` restores the checkpoint; the engine picks up from
-  the last saved state.  Re-submitting a partially finished replica is cheap.
+  the last saved state.  The local duplicate guard requires
+  `--allow-duplicate` when deliberately resubmitting the same job key.
 - CPU jobs: **not idempotent.**  `cpu_worker.py` does not check for an existing
   `result.json`, and it cannot — `sync.before` gives it only the *inputs*
   prefix, so prior outputs are not on the node.  It then wipes `/app/outputs/`
@@ -107,6 +115,21 @@ Using the same `--run-prefix` deliberately extends an existing campaign:
 Change the run prefix when you change the image, inputs, or protocol.  Mixing
 outputs from different images or force fields under the same prefix will
 silently corrupt results.
+
+The local ledger is a guardrail, not a distributed lock.  Before using
+`--allow-duplicate`, confirm that another submitter or worker is not already
+running the same `(run prefix, complex, replica)` key; concurrent copies share
+the same R2 checkpoint path.
+
+---
+
+## Queue autoscaling and idle cost
+
+Configure a Kelpie scaling rule with `min_replicas=0` and a bounded maximum.
+For initial GPU work use `max_replicas=2`; raise it only after clean smoke jobs.
+Kelpie evaluates the queue periodically, so scale-to-zero is not instantaneous.
+Until it is configured and verified, stop the group manually when the queue is
+empty.  A worker printing `No work available` is idle but still billable.
 
 ---
 
@@ -138,9 +161,12 @@ Build the GPU image — requires ≥ 8 GB RAM in Docker Desktop:
 ```bash
 # In Docker Desktop: Settings → Resources → Memory ≥ 8 GB
 docker build --platform linux/amd64 -f Dockerfile.gpu \
-  --build-arg KELPIE_SHA256=<digest> \
   -t <registry>/docking-gpu:001 .
 ```
+
+Both Dockerfiles contain verified SHA-256 defaults for Kelpie 0.6.0; the CPU
+image also verifies the pinned smina static binary.  Update each version and
+its digest together.
 
 The GPU build performs two separate conda transactions to keep peak solver
 RAM under the Docker VM limit.  Do not merge them into one.

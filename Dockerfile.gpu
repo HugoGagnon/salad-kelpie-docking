@@ -31,17 +31,17 @@ RUN conda install -n base --override-channels -c conda-forge -y \
 # Solve 2: heavy AmberTools + OpenFF layer (biggest transaction, isolated so it peaks alone).
 # ambertools is required internally by openmmforcefields for AM1-BCC ligand charges.
 RUN conda install -n base --override-channels -c conda-forge -y \
-        ambertools openff-toolkit openmmforcefields \
+        ambertools openff-toolkit openmmforcefields=0.14.1 \
+    && target="$(find /opt/conda/lib -maxdepth 1 -name 'libstdc++.so.6.*' -type f -print -quit)" \
+    && test -n "$target" \
+    && ln -sf "$(basename "$target")" /opt/conda/lib/libstdc++.so.6 \
     && conda clean -afy
 
-RUN pip install --no-cache-dir boto3 python-dotenv
+RUN pip install --no-cache-dir boto3 importlib-resources python-dotenv
 
-# Conda's libstdc++ compatibility symlink is absent on this Miniconda base.
-# Without it OpenFF cannot load RDKit.  Keep the symlink dynamic so it tracks
-# the installed version.
-RUN target="$(find /opt/conda/lib -maxdepth 1 -name 'libstdc++.so.6.*' -type f -print -quit)" \
-    && test -n "$target" \
-    && ln -sf "$(basename "$target")" /opt/conda/lib/libstdc++.so.6
+# Keep Conda's runtime library ahead of the base image copy.  The compatibility
+# symlink is created in the transaction above before `conda clean` invokes any
+# solver entry points.
 ENV LD_LIBRARY_PATH=/opt/conda/lib
 
 WORKDIR /app
@@ -53,12 +53,12 @@ COPY worker/mmgbsa.py      /app/worker/mmgbsa.py
 # Bake example receptor/ligand data into the image.
 COPY examples/docking/data/ /app/data/
 
-# Kelpie binary — verify SHA-256 when the build arg is provided.
+# Kelpie binary — always verify the pinned SHA-256.
 ARG KELPIE_VERSION=0.6.0
-ARG KELPIE_SHA256=""
+ARG KELPIE_SHA256=c706b8728d6f3a4f71f34a7be531a7d5944894bb6547edb1b661b2b8fd1f47bb
 RUN wget -q "https://github.com/SaladTechnologies/kelpie/releases/download/${KELPIE_VERSION}/kelpie" \
         -O /kelpie \
-    && ([ -z "$KELPIE_SHA256" ] || echo "${KELPIE_SHA256}  /kelpie" | sha256sum --check --strict -) \
+    && echo "${KELPIE_SHA256}  /kelpie" | sha256sum --check --strict - \
     && chmod +x /kelpie
 
 CMD ["/kelpie"]

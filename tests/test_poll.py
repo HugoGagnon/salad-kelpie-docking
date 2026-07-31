@@ -2,13 +2,12 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import poll
-
 
 # ── object_exists ─────────────────────────────────────────────────────────────
 
@@ -92,11 +91,13 @@ def test_poll_cpu_failed(tmp_path):
     """
     manifest = _make_manifest_file(tmp_path, [{"id": "job-003"}])
     client = MagicMock()
-    payload = {"exit_code": 1, "best_affinity_kcal_mol": None}
+    payload = {"exit_code": 1, "best_affinity_kcal_mol": None,
+               "error": "malformed ligand"}
     client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(payload).encode())}
     results = poll.poll_cpu(manifest, "run/v1", "bucket", client)
     assert results["job-003"]["status"] == "failed"
     assert results["job-003"]["exit_code"] == 1
+    assert results["job-003"]["error"] == "malformed ligand"
     # "failed" must be in the terminal set poll.py's --watch loop checks.
     assert results["job-003"]["status"] in {"ok", "failed"}
 

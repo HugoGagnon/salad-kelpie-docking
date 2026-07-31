@@ -83,7 +83,8 @@ def poll_cpu(manifest_path: str, run_prefix: str, bucket: str, client) -> dict:
             results[job_id] = {"status": "ok", "affinity_kcal_mol": result.get("best_affinity_kcal_mol")}
         else:
             results[job_id] = {"status": "failed",
-                               "exit_code": result.get("exit_code")}
+                               "exit_code": result.get("exit_code"),
+                               "error": result.get("error")}
     return results
 
 
