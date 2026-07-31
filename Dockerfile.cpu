@@ -12,6 +12,7 @@
 FROM debian:bookworm-slim
 
 ARG KELPIE_VERSION=0.6.0
+ARG KELPIE_SHA256=""
 ARG SMINA_URL=https://sourceforge.net/projects/smina/files/smina.static/download
 ARG SMINA_SHA256=""
 
@@ -20,6 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     # Install smina static binary.
     && curl --fail --location --retry 3 "$SMINA_URL" -o /usr/local/bin/smina \
+    && ([ -z "$SMINA_SHA256" ] || echo "${SMINA_SHA256}  /usr/local/bin/smina" | sha256sum --check --strict -) \
     && chmod 0755 /usr/local/bin/smina \
     && /usr/local/bin/smina --version \
     # boto3 for multi-job mode R2 access.
