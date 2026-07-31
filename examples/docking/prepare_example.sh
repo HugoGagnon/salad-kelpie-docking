@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# prepare_example.sh — download and prepare the public 1HSG worked example.
+# prepare_example.sh — build the public 1HSG worked example from primary sources.
 #
-# Uses PDB entry 1HSG (HIV-1 protease with co-crystallised indinavir).
-# Reference: Harte WE Jr et al. (1990); PDB deposited by Fitzgerald et al.
-# AutoDock Vina tutorial box coordinates are published at:
-#   https://vina.scripps.edu/tutorial/
+# Receptor: PDB entry 1HSG (HIV-1 protease with co-crystallised indinavir),
+# downloaded from RCSB.
+# Ligands:  four FDA-approved HIV-1 protease inhibitors, downloaded from
+# PubChem by CID.  Each structure is verified against its published InChIKey
+# before use, so a silent upstream change cannot corrupt the example.
 #
-# Requirements: wget or curl, python3, Open Babel (obabel).
-# Install Open Babel: brew install open-babel  OR  apt install openbabel
+# Search box: the published AutoDock Vina tutorial box for 1HSG
+# (https://vina.scripps.edu/tutorial/).
 #
-# What this script does:
-#   1. Downloads 1HSG.pdb from RCSB
-#   2. Strips water molecules and heteroatoms to get the apo receptor
-#   3. Extracts the co-crystal ligand (MK1 / indinavir) as a separate SDF
-#   4. Converts both to PDBQT format for smina
-#   5. Writes box.txt with the published search box centred on the binding site
-#   6. Converts SMILES for three additional public test molecules to PDBQT
+# Requirements: curl (or wget), python3, Open Babel (obabel).
+#   macOS:  pip install openbabel-wheel
+#   Debian: apt install openbabel
+#
+# Produces one self-contained input directory per job id:
+#   data/1hsg__<ligand>/
+#     receptor.pdbqt  ligand.pdbqt  box.txt     <- CPU docking (smina)
+#     receptor.pdb    ligand.sdf                <- GPU MD (OpenMM)
+#
+# The indinavir directory additionally keeps ligand_crystal.pdb, the
+# co-crystallised pose extracted from 1HSG.  It is NOT a docking input; it is
+# the reference for measuring redocking pose RMSD.
 #
 # Run from the repo root:
 #   bash examples/docking/prepare_example.sh
@@ -24,38 +30,42 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PDB_ID="1hsg"
-DATA_DIR="data/${PDB_ID}__indinavir"
-mkdir -p "$DATA_DIR"
-
 PDB_ID_UPPER="$(echo "$PDB_ID" | tr '[:lower:]' '[:upper:]')"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# name : PubChem CID : expected InChIKey (connectivity + stereochemistry)
+LIGANDS="indinavir:5362440:CBVCZFGXHXORBI-PXQQMZJSSA-N
+ritonavir:392622:NCDNCNXCDXHOMX-XGKFQTDJSA-N
+nelfinavir:64143:QAGYKUNXZHXKMR-HKWSIXNMSA-N
+lopinavir:92727:KJHKTHWMRKYKJE-SUGCFTRWSA-N"
+
+fetch() {  # fetch <url> <outfile>
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --max-time 120 "$1" -o "$2"
+    else
+        wget -q --tries=3 --timeout=120 "$1" -O "$2"
+    fi
+}
+
+# ── receptor ──────────────────────────────────────────────────────────────────
 echo "==> Downloading ${PDB_ID_UPPER}.pdb from RCSB"
-if command -v wget &>/dev/null; then
-    wget -q "https://files.rcsb.org/download/${PDB_ID_UPPER}.pdb" -O "${DATA_DIR}/${PDB_ID}.pdb"
-else
-    curl -fsSL "https://files.rcsb.org/download/${PDB_ID_UPPER}.pdb" -o "${DATA_DIR}/${PDB_ID}.pdb"
-fi
+fetch "https://files.rcsb.org/download/${PDB_ID_UPPER}.pdb" "${WORK}/${PDB_ID}.pdb"
 
-echo "==> Extracting receptor (protein only, no HETATM, no water)"
-grep -E '^(ATOM)' "${DATA_DIR}/${PDB_ID}.pdb" > "${DATA_DIR}/receptor_raw.pdb"
+echo "==> Extracting receptor (protein ATOM records only; no waters, no HETATM)"
+grep '^ATOM' "${WORK}/${PDB_ID}.pdb" > "${WORK}/receptor.pdb"
+test -s "${WORK}/receptor.pdb" || { echo "ERROR: no ATOM records found"; exit 1; }
 
-echo "==> Extracting co-crystal ligand (MK1 = indinavir)"
-grep -E '^HETATM.*MK1' "${DATA_DIR}/${PDB_ID}.pdb" > "${DATA_DIR}/ligand_mk1.pdb"
-echo 'END' >> "${DATA_DIR}/ligand_mk1.pdb"
+echo "==> Converting receptor to PDBQT"
+obabel "${WORK}/receptor.pdb" -O "${WORK}/receptor.pdbqt" -xr -h 2>/dev/null
+test -s "${WORK}/receptor.pdbqt" || { echo "ERROR: receptor PDBQT conversion failed"; exit 1; }
 
-echo "==> Converting to PDBQT"
-obabel "${DATA_DIR}/receptor_raw.pdb" -O "${DATA_DIR}/receptor.pdbqt" \
-    -xr -h 2>/dev/null
-obabel "${DATA_DIR}/ligand_mk1.pdb" -O "${DATA_DIR}/ligand.pdbqt" \
-    --gen3d -h 2>/dev/null
+echo "==> Extracting co-crystal ligand (MK1 = indinavir) as redocking reference"
+grep '^HETATM' "${WORK}/${PDB_ID}.pdb" | grep ' MK1 ' > "${WORK}/ligand_crystal.pdb"
+echo 'END' >> "${WORK}/ligand_crystal.pdb"
 
-echo "==> Generating GPU MD inputs (receptor.pdb, ligand.sdf)"
-cp "${DATA_DIR}/receptor_raw.pdb" "${DATA_DIR}/receptor.pdb"
-obabel "${DATA_DIR}/ligand_mk1.pdb" -O "${DATA_DIR}/ligand.sdf" 2>/dev/null
-echo "    receptor.pdb, ligand.sdf"
-
-echo "==> Writing box.txt (published Vina tutorial box for 1HSG)"
-# Box centred on the 1HSG binding site; from the official AutoDock Vina tutorial.
-cat > "${DATA_DIR}/box.txt" <<'BOX'
+# ── box (published AutoDock Vina tutorial box for 1HSG) ───────────────────────
+cat > "${WORK}/box.txt" <<'BOX'
 center_x = 16.0
 center_y = 26.0
 center_z = 4.0
@@ -64,35 +74,52 @@ size_y = 20
 size_z = 20
 BOX
 
-echo "==> Preparing additional test molecules from public SMILES"
-# Three FDA-approved HIV protease inhibitors with known activity, SMILES from PubChem.
-python3 - <<'PY'
-import subprocess, os
+# ── ligands ───────────────────────────────────────────────────────────────────
+echo "$LIGANDS" | while IFS=: read -r name cid want_key; do
+    [ -n "$name" ] || continue
+    echo "==> ${name} (PubChem CID ${cid})"
 
-molecules = [
-    # name, SMILES from PubChem CID
-    ("ritonavir",   "CC(C)c1csc(NC(=O)c2nc(C(C)C)cs2)n1"),
-    ("nelfinavir",  "CC1(C)OC(=O)N(Cc2ccccc2)C1Cc1ccc(O)cc1"),
-    ("lopinavir",   "CC(C)c1csc(NC(=O)[C@@H](Cc2ccccc2)NC(=O)c2ccc(N3CCOCC3)cc2)n1"),
-]
-out_dir = "data/1hsg__indinavir"
-for name, smi in molecules:
-    pdbqt = os.path.join(out_dir, f"test_{name}.pdbqt")
-    result = subprocess.run(
-        ["obabel", f"-:{smi}", "-O", pdbqt, "--gen3d", "-h", "--minimize"],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        print(f"  prepared {name}")
-    else:
-        print(f"  warning: could not prepare {name}: {result.stderr.strip()}")
-PY
+    smiles_file="${WORK}/${name}.smi"
+    fetch "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/property/IsomericSMILES/TXT" \
+          "$smiles_file"
+    smiles="$(tr -d '\r\n' < "$smiles_file")"
+    test -n "$smiles" || { echo "ERROR: empty SMILES for ${name}"; exit 1; }
+
+    got_key="$(obabel -:"$smiles" -oinchikey 2>/dev/null | tr -d '[:space:]')"
+    if [ "$got_key" != "$want_key" ]; then
+        echo "ERROR: InChIKey mismatch for ${name}" >&2
+        echo "       expected ${want_key}" >&2
+        echo "       got      ${got_key}" >&2
+        echo "       PubChem CID ${cid} may have changed; verify before using." >&2
+        exit 1
+    fi
+    echo "    InChIKey verified: ${got_key}"
+
+    out="data/${PDB_ID}__${name}"
+    mkdir -p "$out"
+
+    # 3D conformer for docking.  All four ligands are generated the same way so
+    # their scores are directly comparable; none starts from a crystal pose.
+    obabel -:"$smiles" -O "${out}/ligand.pdbqt" --gen3d -h 2>/dev/null
+    obabel -:"$smiles" -O "${out}/ligand.sdf"   --gen3d -h 2>/dev/null
+    test -s "${out}/ligand.pdbqt" || { echo "ERROR: ${name} PDBQT generation failed"; exit 1; }
+    test -s "${out}/ligand.sdf"   || { echo "ERROR: ${name} SDF generation failed"; exit 1; }
+
+    cp "${WORK}/receptor.pdbqt" "${out}/receptor.pdbqt"
+    cp "${WORK}/receptor.pdb"   "${out}/receptor.pdb"
+    cp "${WORK}/box.txt"        "${out}/box.txt"
+
+    if [ "$name" = "indinavir" ]; then
+        cp "${WORK}/ligand_crystal.pdb" "${out}/ligand_crystal.pdb"
+        echo "    kept ligand_crystal.pdb (redocking RMSD reference)"
+    fi
+    echo "    wrote ${out}/"
+done
 
 echo ""
-echo "==> Example data ready in ${DATA_DIR}/"
-echo "    receptor.pdbqt, ligand.pdbqt, box.txt, test_*.pdbqt"
-echo "    receptor.pdb, ligand.sdf  (GPU MD inputs)"
+echo "==> Example data ready."
+ls -d data/${PDB_ID}__*/ | sed 's/^/    /'
 echo ""
-echo "    Upload inputs to R2 then submit:"
-echo "    python submit.py --mode cpu --manifest examples/docking/jobs.json \\"
-echo "                     --run-prefix <your-prefix>"
+echo "    Upload inputs to R2, then submit:"
+echo "      python submit.py --mode cpu --manifest examples/docking/jobs.json \\"
+echo "                       --run-prefix <your-prefix>"

@@ -113,11 +113,11 @@ def submit_cpu(args, bucket: str, cgid: str) -> None:
     with open(args.manifest) as fh:
         specs = json.load(fh)["jobs"]
     jobs = [cpu_job_def(s, cgid, bucket, run_prefix) for s in specs]
-    if args.max:
+    if args.max is not None:
         jobs = jobs[: args.max]
     print(f"{len(jobs)} CPU docking job(s) | prefix: {run_prefix}/")
     if args.dry_run:
-        print(json.dumps(jobs[0], indent=2))
+        _preview(jobs)
         return
     _require_env(["SALAD_API_KEY", "SALAD_ORGANIZATION", "SALAD_PROJECT", "R2_BUCKET"])
     if not cgid:
@@ -143,6 +143,17 @@ def gpu_job_def(
     name = cx["name"]
     target = cx["target"]
     ligand = cx["ligand"]
+    # gpu_worker.py recomputes the complex name as f"{target}__{ligand}" and
+    # writes its results to outputs/<that name>/, while the R2 root below is
+    # keyed on cx["name"].  If the two disagree, results upload to a path
+    # poll.py never looks at: the job succeeds, the data is orphaned, and
+    # --watch polls forever.  Catch it here, before any node time is spent.
+    expected = f"{target}__{ligand}"
+    if name != expected:
+        raise ValueError(
+            f"complex name {name!r} must equal '<target>__<ligand>' ({expected!r}); "
+            f"gpu_worker.py derives its output path from target and ligand"
+        )
     root = f"{run_prefix}/{name}/rep{replica}"
     ckpt_prefix = f"{root}/checkpoints/"
     out_prefix = f"{root}/outputs/"
@@ -194,13 +205,13 @@ def submit_gpu(args, bucket: str, cgid: str) -> None:
     for cx in complexes:
         for rep in range(args.n_reps):
             jobs.append(gpu_job_def(cx, rep, args.prod_ns, cgid, bucket, run_prefix))
-    if args.max:
+    if args.max is not None:
         jobs = jobs[: args.max]
     total_ns = len(jobs) * args.prod_ns
     print(f"{len(complexes)} complex(es) × {args.n_reps} rep(s) = {len(jobs)} GPU MD job(s)")
     print(f"prefix: {run_prefix}/ | total: {total_ns:.0f} ns")
     if args.dry_run:
-        print(json.dumps(jobs[0], indent=2))
+        _preview(jobs)
         return
     _require_env(["SALAD_API_KEY", "SALAD_ORGANIZATION", "SALAD_PROJECT", "R2_BUCKET"])
     if not cgid:
@@ -216,24 +227,51 @@ def _require_env(keys: list[str]) -> None:
         sys.exit("missing environment variables: " + ", ".join(missing))
 
 
+def _preview(jobs: list[dict]) -> None:
+    """Print the first job definition, or say plainly that there are none."""
+    if not jobs:
+        print("no jobs matched — nothing would be submitted")
+        return
+    print(json.dumps(jobs[0], indent=2))
+
+
+IDS_PATH = "submitted_job_ids.txt"
+
+
 def _post_all(jobs: list[dict], args) -> None:
     api_key = os.environ["SALAD_API_KEY"]
     org = os.environ["SALAD_ORGANIZATION"]
     project = os.environ["SALAD_PROJECT"]
     submitted = []
+    failure = None
     for job in jobs:
         label = (job.get("environment", {}).get("JOB_ID")
                  or f"{job['environment'].get('SYSTEM')} rep{job['environment'].get('REPLICA')}")
         try:
             status, kelpie_id = post_job(job, api_key, org, project)
         except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
-            sys.exit(f"FAILED to submit {label}: {exc}")
+            # Stop submitting, but do not exit yet.  Jobs already accepted are
+            # queued and will run and bill; their Kelpie IDs are the only way to
+            # track or cancel them, so they must be written out before exiting.
+            failure = f"FAILED to submit {label}: {exc}"
+            break
         submitted.append(kelpie_id)
         print(f"  {label}: HTTP {status} | id={kelpie_id}")
-    ids_path = "submitted_job_ids.txt"
-    with open(ids_path, "w") as fh:
-        fh.write("\n".join(x for x in submitted if x))
-    print(f"\n{len(submitted)} job(s) submitted — IDs saved to {ids_path}")
+
+    if submitted:
+        with open(IDS_PATH, "w") as fh:
+            fh.write("\n".join(x for x in submitted if x) + "\n")
+        print(f"\n{len(submitted)} job(s) submitted — IDs saved to {IDS_PATH}")
+
+    if failure:
+        remaining = len(jobs) - len(submitted)
+        print(f"\n{failure}", file=sys.stderr)
+        print(f"{len(submitted)} job(s) were already accepted and are queued; "
+              f"{remaining} were not submitted.", file=sys.stderr)
+        if submitted:
+            print(f"Accepted IDs are in {IDS_PATH} — cancel them there if you "
+                  f"intend to resubmit the batch.", file=sys.stderr)
+        sys.exit(1)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -265,7 +303,12 @@ def main() -> None:
                         help="[gpu] comma-separated target filter")
     args = parser.parse_args()
 
-    bucket = os.getenv("R2_BUCKET", "R2_BUCKET")
+    if args.max is not None and args.max < 0:
+        parser.error("--max must be zero or greater")
+
+    # Deliberately not defaulted to a placeholder: a bogus bucket name would
+    # otherwise reach --dry-run output and be reviewed as if it were real.
+    bucket = os.getenv("R2_BUCKET", "")
     if args.mode == "cpu":
         cgid = (args.container_group_id
                 or os.getenv("CPU_CONTAINER_GROUP_ID")

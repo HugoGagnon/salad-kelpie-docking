@@ -66,10 +66,16 @@ If a job has been pending for a new allocation for more than 30 minutes, see
 ## Resuming a campaign with the same run prefix
 
 Using the same `--run-prefix` deliberately extends an existing campaign:
-- CPU jobs: existing `result.json` files are detected by the worker and the
-  job is skipped (idempotent).
+- **GPU jobs resume. CPU jobs do not.**
 - GPU jobs: `sync.before` restores the checkpoint; the engine picks up from
-  the last saved state.
+  the last saved state.  Re-submitting a partially finished replica is cheap.
+- CPU jobs: **not idempotent.**  `cpu_worker.py` does not check for an existing
+  `result.json`, and it cannot — `sync.before` gives it only the *inputs*
+  prefix, so prior outputs are not on the node.  It then wipes `/app/outputs/`
+  at startup.  Re-submitting a manifest under the same prefix re-docks every
+  job in it and overwrites the previous `result.json` and `poses.pdbqt`.
+  To extend a CPU campaign, submit a manifest containing only the jobs that
+  have not finished yet — use `poll.py` to see which those are.
 
 Change the run prefix when you change the image, inputs, or protocol.  Mixing
 outputs from different images or force fields under the same prefix will

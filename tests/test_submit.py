@@ -140,3 +140,36 @@ def test_run_prefix_is_required_no_default():
     parser.add_argument("--run-prefix", required=True)
     with pytest.raises(SystemExit):
         parser.parse_args([])
+
+
+# ── GPU complex-name invariant ────────────────────────────────────────────────
+
+def test_gpu_job_def_rejects_name_that_breaks_the_output_path():
+    """gpu_worker.py derives its output dir from target/ligand, poll.py from name.
+
+    If cx["name"] != "<target>__<ligand>" the results upload to a key poll.py
+    never checks: the MD completes, the data is orphaned, and --watch hangs.
+    Reject it at submit time rather than after paying for GPU hours.
+    """
+    bad = {"name": "some_label", "target": "receptor", "ligand": "ligand"}
+    with pytest.raises(ValueError, match="target.*__.*ligand|<target>__<ligand>"):
+        submit.gpu_job_def(bad, 0, 10.0, "cgid", "bucket", "campaign/v1")
+
+
+def test_gpu_job_def_accepts_consistent_name():
+    ok = {"name": "receptor__ligand", "target": "receptor", "ligand": "ligand"}
+    job = submit.gpu_job_def(ok, 0, 10.0, "cgid", "bucket", "campaign/v1")
+    assert job["sync"]["after"][0]["prefix"] == "campaign/v1/receptor__ligand/rep0/outputs/"
+
+
+# ── preview / empty job list ──────────────────────────────────────────────────
+
+def test_preview_handles_empty_job_list(capsys):
+    """A --targets typo yields zero jobs; that must report, not raise IndexError."""
+    submit._preview([])
+    assert "no jobs" in capsys.readouterr().out.lower()
+
+
+def test_preview_prints_first_job(capsys):
+    submit._preview([{"container_group_id": "abc"}, {"container_group_id": "def"}])
+    assert "abc" in capsys.readouterr().out

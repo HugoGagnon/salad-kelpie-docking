@@ -82,9 +82,8 @@ def poll_cpu(manifest_path: str, run_prefix: str, bucket: str, client) -> dict:
         elif result.get("exit_code") == 0:
             results[job_id] = {"status": "ok", "affinity_kcal_mol": result.get("best_affinity_kcal_mol")}
         else:
-            results[job_id] = {"status": "failed", "exit_code": result.get("exit_code"),
-                                "attempts": result.get("attempts", 1),
-                                "terminal": result.get("terminal", False)}
+            results[job_id] = {"status": "failed",
+                               "exit_code": result.get("exit_code")}
     return results
 
 
@@ -139,8 +138,7 @@ def report(results: dict) -> None:
         elif status == "running":
             print(f"  … {label}  ({r.get('progress_pct', '?')}%)")
         elif status == "failed":
-            terminal = " [terminal]" if r.get("terminal") else ""
-            print(f"  ✗ {label}  exit={r.get('exit_code')} attempts={r.get('attempts')}{terminal}")
+            print(f"  ✗ {label}  exit={r.get('exit_code')}")
         else:
             print(f"  ○ {label}  pending")
 

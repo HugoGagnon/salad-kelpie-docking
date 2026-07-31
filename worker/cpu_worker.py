@@ -87,15 +87,23 @@ def main() -> None:
     print(f"[cpu_worker] job_id={job_id}  cmd={' '.join(cmd)}")
 
     combined_output = []
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True) as proc:
-        for line in proc.stdout:
-            print(line, end="")
-            combined_output.append(line)
-        proc.wait()
+    try:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True) as proc:
+            for line in proc.stdout:
+                print(line, end="")
+                combined_output.append(line)
+            proc.wait()
+        exit_code = proc.returncode
+    except OSError as exc:
+        # smina missing or not executable.  Record it like any other failure so
+        # the operator sees the cause in R2 instead of an unexplained silence.
+        msg = f"could not execute {SMINA_BIN}: {exc}"
+        print(f"[cpu_worker] {msg}")
+        combined_output.append(msg + "\n")
+        exit_code = 127
 
     finish = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    exit_code = proc.returncode
 
     with open(stdout_log, "w") as fh:
         fh.writelines(combined_output)
@@ -119,8 +127,18 @@ def main() -> None:
     with open(os.path.join(OUTPUT_DIR, "result.json"), "w") as fh:
         json.dump(result, fh, indent=2)
 
+    # Exit zero even when smina failed.  Kelpie runs sync.after only on a
+    # zero exit, so exiting non-zero here would leave result.json stranded on
+    # the node: poll.py would see no artifact, report the job as "pending"
+    # forever, and --watch would never terminate.  The failure is not hidden —
+    # it is recorded in result.json's exit_code, which is what poll.py reads.
+    #
+    # Nor does this lose retries where they matter: a preempted node kills the
+    # process rather than returning an exit status, so Kelpie still requeues
+    # those.  What it stops is the pointless re-running of a job that fails
+    # deterministically on malformed input.
     if exit_code != 0:
-        sys.exit(f"smina exited with code {exit_code}")
+        print(f"[cpu_worker] smina exited {exit_code} — recorded in result.json")
 
 
 def _parse_best_affinity(poses_path: str) -> float | None:

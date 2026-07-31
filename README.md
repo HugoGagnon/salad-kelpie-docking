@@ -64,10 +64,12 @@ config/
   portal.cpu.env.example  CPU container group Portal variables
   portal.gpu.env.example  GPU container group Portal variables
 examples/docking/
-  prepare_example.sh   download and prep public 1HSG data
+  prepare_example.sh   build 1HSG example from RCSB + PubChem (InChIKey-verified)
   jobs.json            CPU docking manifest for the example
   matrix.json          GPU MD manifest for the example
-  data/                prepared PDBQT and SDF files (after prepare_example.sh)
+  data/1hsg__<ligand>/ one self-contained input set per job id:
+                         receptor.pdbqt, ligand.pdbqt, box.txt  (CPU docking)
+                         receptor.pdb,   ligand.sdf             (GPU MD)
 docs/RUNBOOK.md        what to do when things stall or behave oddly
 tests/                 unit tests (no network)
 ```
@@ -90,19 +92,32 @@ tests/                 unit tests (no network)
 bash examples/docking/prepare_example.sh
 ```
 
-This downloads PDB 1HSG, extracts the receptor and co-crystal ligand
-(indinavir), and prepares three additional HIV protease inhibitors as test
-molecules.  All data comes from public sources.
+This downloads PDB 1HSG from RCSB for the receptor, and four FDA-approved
+HIV-1 protease inhibitors (indinavir, ritonavir, nelfinavir, lopinavir) from
+PubChem by CID.  Every ligand is checked against its published InChIKey before
+use, so the run fails loudly rather than silently docking a wrong structure.
+All data comes from public sources.
+
+All four ligands are generated as fresh 3D conformers the same way, so their
+scores are directly comparable.  The co-crystallised indinavir pose is kept
+separately as `1hsg__indinavir/ligand_crystal.pdb` — it is not a docking input,
+it is the reference for measuring redocking RMSD.
 
 ### 3. Upload inputs to R2
+
+The CPU worker needs only `receptor.pdbqt`, `ligand.pdbqt`, and `box.txt`; the
+`.pdb`/`.sdf` files in the same directory are GPU MD inputs and are baked into
+the GPU image instead.
 
 ```bash
 source config/.env   # fill in config/.env from config/.env.example first
 
-aws s3 cp examples/docking/data/1hsg__indinavir/ \
-  s3://${R2_BUCKET}/${RUN_PREFIX}/inputs/1hsg__indinavir/ \
-  --endpoint-url ${AWS_ENDPOINT_URL} --recursive
-# repeat for other job IDs
+for d in examples/docking/data/*/; do
+  job_id="$(basename "$d")"
+  aws s3 cp "$d" "s3://${R2_BUCKET}/${RUN_PREFIX}/inputs/${job_id}/" \
+    --endpoint-url "${AWS_ENDPOINT_URL}" --recursive \
+    --exclude "*" --include "receptor.pdbqt" --include "ligand.pdbqt" --include "box.txt"
+done
 ```
 
 ### 4. Submit

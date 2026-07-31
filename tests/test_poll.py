@@ -85,13 +85,20 @@ def test_poll_cpu_ok(tmp_path):
 
 
 def test_poll_cpu_failed(tmp_path):
+    """A failed job must reach a terminal state, or --watch never exits.
+
+    This depends on cpu_worker.py exiting zero after recording a failure, so
+    that Kelpie's sync.after uploads the result.json carrying exit_code != 0.
+    """
     manifest = _make_manifest_file(tmp_path, [{"id": "job-003"}])
     client = MagicMock()
-    payload = {"exit_code": 1, "attempts": 3, "terminal": True}
+    payload = {"exit_code": 1, "best_affinity_kcal_mol": None}
     client.get_object.return_value = {"Body": MagicMock(read=lambda: json.dumps(payload).encode())}
     results = poll.poll_cpu(manifest, "run/v1", "bucket", client)
     assert results["job-003"]["status"] == "failed"
-    assert results["job-003"]["terminal"] is True
+    assert results["job-003"]["exit_code"] == 1
+    # "failed" must be in the terminal set poll.py's --watch loop checks.
+    assert results["job-003"]["status"] in {"ok", "failed"}
 
 
 # ── poll_gpu ──────────────────────────────────────────────────────────────────
