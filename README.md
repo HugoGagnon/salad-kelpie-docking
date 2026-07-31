@@ -85,8 +85,11 @@ tests/                 unit tests (no network)
 - Docker with ≥ 4 GB RAM and x86_64 build support
 - A Salad account with a CPU container group running this image
 - A Cloudflare R2 bucket
-- Open Babel (`brew install open-babel` or `apt install openbabel`)
-- Python 3.11+ with `boto3` (`pip install boto3`)
+- Open Babel (`pip install openbabel-wheel`, or `apt install openbabel`)
+- Python 3.11+ with `boto3` and `rdkit` (`pip install boto3 rdkit`)
+
+RDKit is used only by `examples/docking/prepare_example.sh`, to generate and
+verify 3D ligand conformers.  Submitting and polling need only `boto3`.
 
 ### 2. Prepare example data
 
@@ -96,9 +99,16 @@ bash examples/docking/prepare_example.sh
 
 This downloads PDB 1HSG from RCSB for the receptor, and four FDA-approved
 HIV-1 protease inhibitors (indinavir, ritonavir, nelfinavir, lopinavir) from
-PubChem by CID.  Every ligand is checked against its published InChIKey before
-use, so the run fails loudly rather than silently docking a wrong structure.
-All data comes from public sources.
+PubChem by CID.  All data comes from public sources.
+
+Each ligand is verified twice against its published InChIKey: once on the
+SMILES fetched from PubChem, and again on the **generated 3D conformer**, so a
+structure that lost its stereochemistry during embedding cannot reach disk.
+The second check is the one that matters — Open Babel's `--gen3d` emits flat
+2D coordinates for flexible molecules such as lopinavir while still exiting 0,
+and a flat conformer of a chiral drug docks to a meaningless number.  3D
+geometry comes from PubChem's own record where one exists, and from RDKit
+ETKDG (fixed seed, so results are reproducible) where it does not.
 
 All four ligands are generated as fresh 3D conformers the same way, so their
 scores are directly comparable.  The co-crystallised indinavir pose is kept

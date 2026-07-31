@@ -110,3 +110,84 @@ def test_box_config_is_smina_format(job_id):
             keys.add(line.split("=")[0].strip())
     required = {"center_x", "center_y", "center_z", "size_x", "size_y", "size_z"}
     assert required <= keys, f"{job_id}: box.txt missing {sorted(required - keys)}"
+
+
+# ── 3D geometry ───────────────────────────────────────────────────────────────
+#
+# Open Babel's --gen3d silently emitted flat 2D coordinates for lopinavir while
+# exiting 0.  A flat conformer has no stereochemistry: it docks to a meaningless
+# score, and OpenFF rejects it outright, so GPU jobs die after allocation.
+# Verifying the input SMILES does not catch this -- the written file must be
+# checked.
+
+MIN_Z_RANGE_A = 1.0
+
+
+def _z_range_sdf(path):
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    n_atoms = int(lines[3][:3])
+    zs = [float(l[20:30]) for l in lines[4:4 + n_atoms]]
+    return max(zs) - min(zs)
+
+
+def _z_range_pdbqt(path):
+    zs = []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith(("ATOM", "HETATM")):
+                zs.append(float(line[46:54]))
+    return max(zs) - min(zs) if zs else 0.0
+
+
+@pytest.mark.parametrize("job_id", _job_ids())
+def test_ligand_sdf_has_real_3d_coordinates(job_id):
+    path = os.path.join(DATA_DIR, job_id, "ligand.sdf")
+    assert os.path.isfile(path), f"missing ligand.sdf for {job_id}"
+    z = _z_range_sdf(path)
+    assert z >= MIN_Z_RANGE_A, (
+        f"{job_id}: ligand.sdf spans only {z:.2f} A in z — the conformer is flat, "
+        f"so its stereochemistry is undefined and OpenFF will reject it"
+    )
+
+
+@pytest.mark.parametrize("job_id", _job_ids())
+def test_ligand_pdbqt_has_real_3d_coordinates(job_id):
+    path = os.path.join(DATA_DIR, job_id, "ligand.pdbqt")
+    assert os.path.isfile(path), f"missing ligand.pdbqt for {job_id}"
+    z = _z_range_pdbqt(path)
+    assert z >= MIN_Z_RANGE_A, (
+        f"{job_id}: ligand.pdbqt spans only {z:.2f} A in z — docking a flat "
+        f"conformer of a chiral drug returns a meaningless affinity"
+    )
+
+
+# Published InChIKeys (connectivity + stereochemistry) for the example ligands.
+EXPECTED_INCHIKEY = {
+    "1hsg__indinavir": "CBVCZFGXHXORBI-PXQQMZJSSA-N",
+    "1hsg__ritonavir": "NCDNCNXCDXHOMX-XGKFQTDJSA-N",
+    "1hsg__nelfinavir": "QAGYKUNXZHXKMR-HKWSIXNMSA-N",
+    "1hsg__lopinavir": "KJHKTHWMRKYKJE-SUGCFTRWSA-N",
+}
+
+
+@pytest.mark.parametrize("job_id", _job_ids())
+def test_ligand_stereochemistry_matches_published_structure(job_id):
+    """The strongest check: re-derive the InChIKey from the 3D coordinates."""
+    rdkit = pytest.importorskip("rdkit", reason="RDKit not installed")
+    from rdkit import Chem
+
+    expected = EXPECTED_INCHIKEY.get(job_id)
+    if expected is None:
+        pytest.skip(f"no reference InChIKey for {job_id}")
+    path = os.path.join(DATA_DIR, job_id, "ligand.sdf")
+    mol = Chem.MolFromMolFile(path, removeHs=False)
+    assert mol is not None, f"{job_id}: ligand.sdf could not be parsed"
+    Chem.AssignStereochemistryFrom3D(mol)
+    got = Chem.inchi.MolToInchiKey(mol)
+    assert got == expected, (
+        f"{job_id}: conformer is not the published structure.\n"
+        f"  expected {expected}\n  got      {got}\n"
+        f"A differing stereochemistry block means the 3D geometry is wrong or "
+        f"undefined; re-run prepare_example.sh"
+    )

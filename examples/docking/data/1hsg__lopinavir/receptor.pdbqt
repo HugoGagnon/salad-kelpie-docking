@@ -1,4 +1,4 @@
-REMARK  Name = /var/folders/f3/_p0zvjjj4cld9xrt10467fj80000gp/T/tmp.kVWg6HA3kF/receptor.pdb
+REMARK  Name = /var/folders/f3/_p0zvjjj4cld9xrt10467fj80000gp/T/tmp.Ik8UhBrgHy/receptor.pdb
 REMARK                            x       y       z     vdW  Elec       q    Type
 REMARK                         _______ _______ _______ _____ _____    ______ ____
 ATOM      1  N   PRO A   1      29.361  39.686   5.862  0.00  0.00    +0.000 NA
@@ -920,7 +920,7 @@ ATOM    916  H   ASN A  98      24.644  39.276  -5.895  0.00  0.00    +0.000 HD
 ATOM    917  H   ASN A  98      23.874  40.020  -4.568  0.00  0.00    +0.000 HD
 ATOM    918  H   PHE A  99      23.745  35.057  -7.649  0.00  0.00    +0.000 HD
 TER 
-REMARK  Name = /var/folders/f3/_p0zvjjj4cld9xrt10467fj80000gp/T/tmp.kVWg6HA3kF/receptor.pdb
+REMARK  Name = /var/folders/f3/_p0zvjjj4cld9xrt10467fj80000gp/T/tmp.Ik8UhBrgHy/receptor.pdb
 REMARK                            x       y       z     vdW  Elec       q    Type
 REMARK                         _______ _______ _______ _____ _____    ______ ____
 ATOM      1  N   PRO B   1      22.659  36.727 -10.823  0.00  0.00    +0.000 NA

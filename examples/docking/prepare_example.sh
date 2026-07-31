@@ -27,18 +27,23 @@
 #   bash examples/docking/prepare_example.sh
 
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 PDB_ID="1hsg"
 PDB_ID_UPPER="$(echo "$PDB_ID" | tr '[:lower:]' '[:upper:]')"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# name : PubChem CID : expected InChIKey (connectivity + stereochemistry)
-LIGANDS="indinavir:5362440:CBVCZFGXHXORBI-PXQQMZJSSA-N
-ritonavir:392622:NCDNCNXCDXHOMX-XGKFQTDJSA-N
-nelfinavir:64143:QAGYKUNXZHXKMR-HKWSIXNMSA-N
-lopinavir:92727:KJHKTHWMRKYKJE-SUGCFTRWSA-N"
+LIGAND_SPEC="${WORK}/ligands.json"
+cat > "$LIGAND_SPEC" <<'JSON'
+[
+  {"name": "indinavir",  "cid": 5362440, "inchikey": "CBVCZFGXHXORBI-PXQQMZJSSA-N"},
+  {"name": "ritonavir",  "cid": 392622,  "inchikey": "NCDNCNXCDXHOMX-XGKFQTDJSA-N"},
+  {"name": "nelfinavir", "cid": 64143,   "inchikey": "QAGYKUNXZHXKMR-HKWSIXNMSA-N"},
+  {"name": "lopinavir",  "cid": 92727,   "inchikey": "KJHKTHWMRKYKJE-SUGCFTRWSA-N"}
+]
+JSON
 
 fetch() {  # fetch <url> <outfile>
     if command -v curl >/dev/null 2>&1; then
@@ -75,45 +80,33 @@ size_z = 20
 BOX
 
 # ── ligands ───────────────────────────────────────────────────────────────────
-echo "$LIGANDS" | while IFS=: read -r name cid want_key; do
-    [ -n "$name" ] || continue
-    echo "==> ${name} (PubChem CID ${cid})"
+# 3D generation and its verification live in prepare_ligands.py.  Every ligand
+# is checked twice: the SMILES from PubChem against its published InChIKey, and
+# then the generated conformer's own geometry against the same key, so a
+# structure that lost stereochemistry cannot reach disk.  All four are built the
+# same way, so their scores stay comparable; none starts from a crystal pose.
+python3 "${SCRIPT_DIR}/prepare_ligands.py" \
+    --ligands "$LIGAND_SPEC" --prefix "$PDB_ID" --data-dir data
 
-    smiles_file="${WORK}/${name}.smi"
-    fetch "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/property/IsomericSMILES/TXT" \
-          "$smiles_file"
-    smiles="$(tr -d '\r\n' < "$smiles_file")"
-    test -n "$smiles" || { echo "ERROR: empty SMILES for ${name}"; exit 1; }
+# ── assemble one self-contained input set per job id ──────────────────────────
+echo "==> Assembling input directories"
+for out in data/${PDB_ID}__*/; do
+    name="$(basename "$out")"
+    test -s "${out}/ligand.sdf" || { echo "ERROR: ${name} has no ligand.sdf"; exit 1; }
 
-    got_key="$(obabel -:"$smiles" -oinchikey 2>/dev/null | tr -d '[:space:]')"
-    if [ "$got_key" != "$want_key" ]; then
-        echo "ERROR: InChIKey mismatch for ${name}" >&2
-        echo "       expected ${want_key}" >&2
-        echo "       got      ${got_key}" >&2
-        echo "       PubChem CID ${cid} may have changed; verify before using." >&2
-        exit 1
-    fi
-    echo "    InChIKey verified: ${got_key}"
-
-    out="data/${PDB_ID}__${name}"
-    mkdir -p "$out"
-
-    # 3D conformer for docking.  All four ligands are generated the same way so
-    # their scores are directly comparable; none starts from a crystal pose.
-    obabel -:"$smiles" -O "${out}/ligand.pdbqt" --gen3d -h 2>/dev/null
-    obabel -:"$smiles" -O "${out}/ligand.sdf"   --gen3d -h 2>/dev/null
-    test -s "${out}/ligand.pdbqt" || { echo "ERROR: ${name} PDBQT generation failed"; exit 1; }
-    test -s "${out}/ligand.sdf"   || { echo "ERROR: ${name} SDF generation failed"; exit 1; }
+    # Docking input is converted from the SAME verified conformer rather than
+    # generated independently, so the two files cannot disagree.
+    obabel "${out}/ligand.sdf" -O "${out}/ligand.pdbqt" 2>/dev/null
+    test -s "${out}/ligand.pdbqt" || { echo "ERROR: ${name} PDBQT conversion failed"; exit 1; }
 
     cp "${WORK}/receptor.pdbqt" "${out}/receptor.pdbqt"
     cp "${WORK}/receptor.pdb"   "${out}/receptor.pdb"
     cp "${WORK}/box.txt"        "${out}/box.txt"
 
-    if [ "$name" = "indinavir" ]; then
+    if [ "$name" = "${PDB_ID}__indinavir" ]; then
         cp "${WORK}/ligand_crystal.pdb" "${out}/ligand_crystal.pdb"
-        echo "    kept ligand_crystal.pdb (redocking RMSD reference)"
     fi
-    echo "    wrote ${out}/"
+    echo "    ${out}"
 done
 
 echo ""
